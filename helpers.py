@@ -18,6 +18,7 @@ def build_buttons(main_link: str, preview: str | None) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("🚀 Watch & Download", url=main_link)]]
     if preview:
         rows.append([InlineKeyboardButton("👀 See Preview", url=preview)])
+    rows.append([InlineKeyboardButton("💎 Buy Premium / Remove Ads", url="https://t.me/NgPremiumX/14")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -33,7 +34,6 @@ async def send_post_to_channels(
     caption = build_caption(title)
     buttons = build_buttons(main_link, preview)
     success = 0
-
     for cid in channel_ids:
         try:
             if is_video:
@@ -53,6 +53,5 @@ async def send_post_to_channels(
             success += 1
         except Exception as e:
             print(f"[ERROR] channel {cid}: {e}")
-
     await db.save_log(title, channel_ids)
     return success

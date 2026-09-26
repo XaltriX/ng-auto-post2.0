@@ -13,16 +13,21 @@ async def scheduler_loop(app: Client):
         try:
             posts = await db.get_pending_posts()
             for post in posts:
-                channels = post.get("channels", [])
-                is_video = post.get("is_video", False)
+                # "all" mode → resolve channels LIVE at send time, so any
+                # channel added after scheduling (but before send time) is
+                # included automatically.
+                if post.get("channels_mode") == "all":
+                    all_channels = await db.get_all_channels()
+                    channel_ids = [c["channel_id"] for c in all_channels]
+                else:
+                    channel_ids = post.get("channels", [])
+
                 sent = await helpers.send_post_to_channels(
                     app=app,
                     title=post["title"],
-                    thumbnail=post["thumbnail"],
                     main_link=post["main_link"],
                     preview=post.get("preview"),
-                    channel_ids=channels,
-                    is_video=is_video,
+                    channel_ids=channel_ids,
                 )
                 await db.mark_post_sent(post["_id"])
                 print(f"[SCHEDULER] Sent '{post['title']}' to {sent} channels.")

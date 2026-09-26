@@ -40,6 +40,15 @@ def register_handlers(app: Client):
             reply_markup=main_menu(),
         )
 
+    # ── /cancel — abort whatever multi-step flow is in progress ────────────────
+
+    @app.on_message(filters.command("cancel") & filters.private)
+    async def cmd_cancel(client: Client, msg: Message):
+        if not is_admin(msg.from_user.id):
+            return
+        state.clear(msg.from_user.id)
+        await msg.reply("❌ Cancelled.", reply_markup=main_menu())
+
     # ── Callback router ───────────────────────────────────────────────────────
 
     @app.on_callback_query()
@@ -61,7 +70,14 @@ def register_handlers(app: Client):
         elif data == "create_post":
             state.clear(uid)
             state.set_key(uid, "step", "title")
-            await cb.message.edit_text("📝 Send the **Title** of your post:")
+            await cb.message.edit_text(
+                "📝 Send the **Title** of your post:",
+                reply_markup=cancel_btn(),
+            )
+
+        elif data == "cancel_create":
+            state.clear(uid)
+            await cb.message.edit_text("❌ Post creation cancelled.", reply_markup=back_btn())
 
         # ── Post Now / Schedule ───────────────────────────────────────────────
         elif data == "post_now":
@@ -125,6 +141,7 @@ def register_handlers(app: Client):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⏱ Minutes", callback_data="qs_minutes"),
                      InlineKeyboardButton("🕐 Hours", callback_data="qs_hours")],
+                    [InlineKeyboardButton("🎯 Exact Hour", callback_data="qs_exact")],
                     [InlineKeyboardButton("📅 Today", callback_data="qs_today"),
                      InlineKeyboardButton("🌅 Tomorrow", callback_data="qs_tomorrow")],
                     [InlineKeyboardButton("🔙 Back", callback_data="schedule_post")],
@@ -147,14 +164,13 @@ def register_handlers(app: Client):
         elif data == "qs_hours":
             await cb.message.edit_text(
                 "🕐 Choose hours:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("+1h", callback_data="qst_1h"),
-                     InlineKeyboardButton("+2h", callback_data="qst_2h"),
-                     InlineKeyboardButton("+3h", callback_data="qst_3h")],
-                    [InlineKeyboardButton("+6h", callback_data="qst_6h"),
-                     InlineKeyboardButton("+12h", callback_data="qst_12h")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="quick_sched")],
-                ]),
+                reply_markup=build_hours_menu(),
+            )
+
+        elif data == "qs_exact":
+            await cb.message.edit_text(
+                "🎯 Choose exact hour (next 12h):",
+                reply_markup=build_exact_hour_menu(),
             )
 
         elif data == "qs_today":
@@ -201,6 +217,7 @@ def register_handlers(app: Client):
             channels = await db.get_all_channels()
             cids = [c["channel_id"] for c in channels]
             state.set_key(uid, "selected_channels", cids)
+            state.set_key(uid, "channels_mode", "all")
             await show_schedule_confirm(cb.message, uid)
 
         elif data == "ch_select":
@@ -224,18 +241,21 @@ def register_handlers(app: Client):
             if not selected:
                 return await cb.answer("⚠️ Select at least one channel.", show_alert=True)
             state.set_key(uid, "selected_channels", selected)
+            state.set_key(uid, "channels_mode", "select")
             await show_schedule_confirm(cb.message, uid)
 
         # ── Schedule confirm/cancel ───────────────────────────────────────────
         elif data == "sched_confirm":
             sess = state.get(uid)
+            channels_mode = sess.get("channels_mode", "select")
             await db.save_scheduled_post({
                 "title": sess["title"],
-                "thumbnail": sess["thumbnail"],
                 "main_link": sess["main_link"],
                 "preview": sess.get("preview"),
-                "is_video": sess.get("is_video", False),
-                "channels": sess["selected_channels"],
+                "channels_mode": channels_mode,
+                # "all" mode → resolved LIVE by the scheduler at send time,
+                # so we don't need to freeze the channel list here.
+                "channels": sess["selected_channels"] if channels_mode == "select" else [],
                 "schedule_time": sess["schedule_time"],
             })
             state.clear(uid)
@@ -324,9 +344,9 @@ def register_handlers(app: Client):
             await db.cancel_post(post_id)
             await cb.message.edit_text("✅ Post cancelled.", reply_markup=back_btn())
 
-    # ── Message handler (multi-step text/media input) ─────────────────────────
+    # ── Message handler (multi-step text input) ────────────────────────────────
 
-    @app.on_message(filters.private & ~filters.command(["start"]))
+    @app.on_message(filters.private & ~filters.command(["start", "cancel"]))
     async def msg_handler(client: Client, msg: Message):
         uid = msg.from_user.id
         if not is_admin(uid):
@@ -336,31 +356,25 @@ def register_handlers(app: Client):
 
         if step == "title":
             state.set_key(uid, "title", msg.text.strip())
-            state.set_key(uid, "step", "thumbnail")
-            await msg.reply("📸 Now send the **Thumbnail** (photo or video):")
-
-        elif step == "thumbnail":
-            if msg.photo:
-                state.set_key(uid, "thumbnail", msg.photo.file_id)
-                state.set_key(uid, "is_video", False)
-            elif msg.video:
-                state.set_key(uid, "thumbnail", msg.video.file_id)
-                state.set_key(uid, "is_video", True)
-            else:
-                return await msg.reply("⚠️ Please send a photo or video.")
-            state.set_key(uid, "step", "main_link")
-            await msg.reply("🔗 Send the **Main Link**:")
-
-        elif step == "main_link":
-            state.set_key(uid, "main_link", msg.text.strip())
             state.set_key(uid, "step", "preview")
-            await msg.reply("👀 Send **Preview Link** or type /skip:")
+            await msg.reply(
+                "👀 Send the **Preview Link** (or /skip):",
+                reply_markup=cancel_btn(),
+            )
 
         elif step == "preview":
             if msg.text and msg.text.strip() == "/skip":
                 state.set_key(uid, "preview", None)
             else:
                 state.set_key(uid, "preview", msg.text.strip() if msg.text else None)
+            state.set_key(uid, "step", "main_link")
+            await msg.reply(
+                "📥 Send the **Download Link**:",
+                reply_markup=cancel_btn(),
+            )
+
+        elif step == "main_link":
+            state.set_key(uid, "main_link", msg.text.strip())
             state.set_key(uid, "step", None)
             await msg.reply(
                 "✅ **Post Ready!**",
@@ -435,17 +449,61 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def cancel_btn() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_create")]])
+
+
+def back_btn() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]])
+
+
+def build_hours_menu() -> InlineKeyboardMarkup:
+    """Relative +Nh quick options: 1..12, then 16, 20, 24."""
+    hours = list(range(1, 13)) + [16, 20, 24]
+    rows = []
+    row = []
+    for h in hours:
+        row.append(InlineKeyboardButton(f"+{h}h", callback_data=f"qst_{h}h"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="quick_sched")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_exact_hour_menu() -> InlineKeyboardMarkup:
+    """
+    Next 12 exact hour marks (e.g. now=13:44 → 14:00, 15:00 ... 01:00),
+    computed fresh every time this menu is opened.
+    """
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    rows = []
+    row = []
+    for i in range(1, 13):
+        target = (now_ist + timedelta(hours=i)).replace(minute=0, second=0, microsecond=0)
+        day_offset = (target.date() - now_ist.date()).days
+        label = target.strftime("%H:00")
+        row.append(InlineKeyboardButton(label, callback_data=f"qst_eh_{target.hour}_{day_offset}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="quick_sched")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def do_post_now(client, message, uid: int):
     sess = state.get(uid)
     cids = sess.get("pn_selected", [])
     sent = await helpers.send_post_to_channels(
         app=client,
         title=sess["title"],
-        thumbnail=sess["thumbnail"],
         main_link=sess["main_link"],
         preview=sess.get("preview"),
         channel_ids=cids,
-        is_video=sess.get("is_video", False),
     )
     state.clear(uid)
     await message.edit_text(
@@ -470,10 +528,6 @@ async def show_pn_toggle_list(message, uid: int):
         await message.edit_text("Select channels to post:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception:
         pass
-
-
-def back_btn() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]])
 
 
 async def show_channel_selection(message, uid: int):
@@ -526,15 +580,21 @@ async def show_schedule_confirm(message, uid: int):
     sess = state.get(uid)
     sched_time: datetime = sess.get("schedule_time")
     channels = sess.get("selected_channels", [])
+    channels_mode = sess.get("channels_mode", "select")
 
     ist_offset = timedelta(hours=5, minutes=30)
     ist_time = sched_time.astimezone(timezone(ist_offset))
     time_str = ist_time.strftime("%d-%m-%Y %H:%M IST")
 
+    if channels_mode == "all":
+        channels_line = f"📢 Channels: **All ({len(channels)})** — new channels auto-included"
+    else:
+        channels_line = f"📢 Channels: {len(channels)}"
+
     await message.edit_text(
         f"📋 **Confirm Schedule**\n\n"
         f"🕒 Time: `{time_str}`\n"
-        f"📢 Channels: {len(channels)}",
+        f"{channels_line}",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Confirm", callback_data="sched_confirm"),
              InlineKeyboardButton("❌ Cancel", callback_data="sched_cancel")],
@@ -585,10 +645,20 @@ def resolve_quick_time(data: str) -> datetime | None:
     if m:
         return now + timedelta(minutes=int(m.group(1)))
 
-    # Hours: qst_1h, qst_2h etc.
+    # Hours (relative): qst_1h, qst_2h ... qst_24h
     m = re.match(r"qst_(\d+)h$", data)
     if m:
         return now + timedelta(hours=int(m.group(1)))
+
+    # Exact hour: qst_eh_<hour>_<day_offset>
+    m = re.match(r"qst_eh_(\d+)_(\d+)$", data)
+    if m:
+        hour = int(m.group(1))
+        day_offset = int(m.group(2))
+        now_ist = now.astimezone(timezone(ist_offset))
+        target_date = now_ist + timedelta(days=day_offset)
+        target = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
+        return target.astimezone(timezone.utc)
 
     # Today IST hour: qst_today_18
     m = re.match(r"qst_today_(\d+)$", data)

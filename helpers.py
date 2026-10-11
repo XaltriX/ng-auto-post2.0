@@ -42,7 +42,7 @@ def build_caption(title: str, preview_link: str | None, main_link: str) -> str:
 def build_buttons() -> InlineKeyboardMarkup:
     """Only the Buy Premium / Remove Ads button remains inline now."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Buy Premium / Remove Ads", url="https://t.me/NgPremiumX/14")],
+        [InlineKeyboardButton("💎 Buy Premium / Remove Ads", url="https://t.me/ForeignXHubBot?start=premium")],
     ])
 
 
